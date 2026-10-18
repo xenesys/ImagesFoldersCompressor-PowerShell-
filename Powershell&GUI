@@ -1,0 +1,413 @@
+<#
+.SYNOPSIS
+    Interface graphique pour scanner un répertoire, filtrer par nom de dossier et extensions,
+    visualiser l'arborescence triée alphabétiquement, puis compresser chaque sous-dossier correspondant en ZIP.
+#>
+
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+
+[System.Windows.Forms.Application]::EnableVisualStyles()
+
+$script:cancelRequested = $false
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = "Compresseur de Dossiers d'Images - 0.11"
+$form.Size = New-Object System.Drawing.Size(1040, 620)
+$form.StartPosition = "CenterScreen"
+$form.FormBorderStyle = 'FixedDialog'
+$form.MaximizeBox = $false
+
+$labelDir = New-Object System.Windows.Forms.Label
+$labelDir.Text = "Répertoire racine à scanner :"
+$labelDir.Location = New-Object System.Drawing.Point(15, 15)
+$labelDir.AutoSize = $true
+$form.Controls.Add($labelDir)
+
+$txtDir = New-Object System.Windows.Forms.TextBox
+$txtDir.Location = New-Object System.Drawing.Point(15, 40)
+$txtDir.Size = New-Object System.Drawing.Size(380, 23)
+$form.Controls.Add($txtDir)
+
+$btnBrowse = New-Object System.Windows.Forms.Button
+$btnBrowse.Text = "Parcourir..."
+$btnBrowse.Location = New-Object System.Drawing.Point(405, 38)
+$btnBrowse.Size = New-Object System.Drawing.Size(85, 25)
+$form.Controls.Add($btnBrowse)
+
+$labelExclude = New-Object System.Windows.Forms.Label
+$labelExclude.Text = "Fichiers / motifs à exclure (séparés par des virgules) :"
+$labelExclude.Location = New-Object System.Drawing.Point(15, 75)
+$labelExclude.AutoSize = $true
+$form.Controls.Add($labelExclude)
+
+$txtExclude = New-Object System.Windows.Forms.TextBox
+$txtExclude.Text = "folder.*, cover.*, folder2.*, front.*"
+$txtExclude.Location = New-Object System.Drawing.Point(15, 95)
+$txtExclude.Size = New-Object System.Drawing.Size(475, 23)
+$form.Controls.Add($txtExclude)
+
+$labelExt = New-Object System.Windows.Forms.Label
+$labelExt.Text = "Extensions de fichiers à traiter (séparées par des virgules) :"
+$labelExt.Location = New-Object System.Drawing.Point(15, 130)
+$labelExt.AutoSize = $true
+$form.Controls.Add($labelExt)
+
+$txtExt = New-Object System.Windows.Forms.TextBox
+$txtExt.Text = "jpg, jpeg, png, gif, bmp, webp, tiff, tif"
+$txtExt.Location = New-Object System.Drawing.Point(15, 150)
+$txtExt.Size = New-Object System.Drawing.Size(475, 23)
+$form.Controls.Add($txtExt)
+
+$labelDirFilter = New-Object System.Windows.Forms.Label
+$labelDirFilter.Text = "Noms de répertoires à compresser (vide = TOUS) :"
+$labelDirFilter.Location = New-Object System.Drawing.Point(15, 185)
+$labelDirFilter.AutoSize = $true
+$form.Controls.Add($labelDirFilter)
+
+$txtDirFilter = New-Object System.Windows.Forms.TextBox
+$txtDirFilter.Text = "scan, cover, artwork"
+$txtDirFilter.Location = New-Object System.Drawing.Point(15, 205)
+$txtDirFilter.Size = New-Object System.Drawing.Size(475, 23)
+$form.Controls.Add($txtDirFilter)
+
+$chkDelete = New-Object System.Windows.Forms.CheckBox
+$chkDelete.Text = "Supprimer les dossiers d'origine si compression & validation OK"
+$chkDelete.Location = New-Object System.Drawing.Point(15, 240)
+$chkDelete.AutoSize = $true
+$form.Controls.Add($chkDelete)
+
+$btnScan = New-Object System.Windows.Forms.Button
+$btnScan.Text = "1. Analyser & Prévisualiser"
+$btnScan.Location = New-Object System.Drawing.Point(15, 270)
+$btnScan.Size = New-Object System.Drawing.Size(230, 35)
+$btnScan.BackColor = [System.Drawing.Color]::FromArgb(52, 152, 219)
+$btnScan.ForeColor = [System.Drawing.Color]::White
+$btnScan.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$form.Controls.Add($btnScan)
+
+$btnStart = New-Object System.Windows.Forms.Button
+$btnStart.Text = "2. Lancer la compression"
+$btnStart.Location = New-Object System.Drawing.Point(260, 270)
+$btnStart.Size = New-Object System.Drawing.Size(230, 35)
+$btnStart.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113)
+$btnStart.ForeColor = [System.Drawing.Color]::White
+$btnStart.Font = New-Object System.Drawing.Font("Segoe UI", 9.5, [System.Drawing.FontStyle]::Bold)
+$form.Controls.Add($btnStart)
+
+$txtLog = New-Object System.Windows.Forms.RichTextBox
+$txtLog.Location = New-Object System.Drawing.Point(15, 315)
+$txtLog.Size = New-Object System.Drawing.Size(475, 255)
+$txtLog.ReadOnly = $true
+$txtLog.BackColor = [System.Drawing.Color]::FromArgb(245, 245, 245)
+$form.Controls.Add($txtLog)
+
+$labelTree = New-Object System.Windows.Forms.Label
+$labelTree.Text = "Aperçu des répertoires et fichiers détectés :"
+$labelTree.Location = New-Object System.Drawing.Point(510, 15)
+$labelTree.AutoSize = $true
+$labelTree.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$form.Controls.Add($labelTree)
+
+$treeView = New-Object System.Windows.Forms.TreeView
+$treeView.Location = New-Object System.Drawing.Point(510, 40)
+$treeView.Size = New-Object System.Drawing.Size(495, 530)
+$treeView.ShowLines = $true
+$treeView.ShowPlusMinus = $true
+$treeView.ShowRootLines = $true
+$form.Controls.Add($treeView)
+
+Function Get-ImageExtensions {
+    $exts = $txtExt.Text -split ',' | ForEach-Object { $_.Trim().TrimStart('.') } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    return @($exts | ForEach-Object { ".$_".ToLower() })
+}
+
+Function Test-DirectoryFilter([string]$dirPath, [string[]]$filters) {
+    if ($filters.Count -eq 0) { return $true }
+    $dirName = [System.IO.Path]::GetFileName($dirPath)
+    foreach ($f in $filters) {
+        $pattern = if ($f -notmatch '\*|\?') { "*$f*" } else { $f }
+        if ($dirName -like $pattern) { return $true }
+    }
+    return $false
+}
+
+Function Test-FileExcluded([System.IO.FileInfo]$file, [string[]]$excludePatterns) {
+    foreach ($pattern in $excludePatterns) {
+        if ($file.Name -like $pattern) {
+            return $true
+        }
+    }
+    return $false
+}
+
+Function Add-DirectoryToTree($parentPath, $parentNode, $imageExtensions, $excludePatterns, $dirFilters) {
+    $anyKept = $false
+    try {
+        $subDirs = [System.IO.Directory]::GetDirectories($parentPath) | Sort-Object
+        foreach ($dirPath in $subDirs) {
+            $dirName = [System.IO.Path]::GetFileName($dirPath)
+            $isFilteredDir = Test-DirectoryFilter -dirPath $dirPath -filters $dirFilters
+            $dirInfo = [System.IO.DirectoryInfo]$dirPath
+
+            $ownWork = $false
+            $fileNodes = @()
+            foreach ($file in ($dirInfo.GetFiles() | Sort-Object Name)) {
+                if ($imageExtensions -notcontains $file.Extension.ToLower()) { continue }
+                if ($dirFilters.Count -gt 0 -and -not $isFilteredDir) { continue }
+
+                $isExcluded = $false
+                if (-not $isFilteredDir -or $dirFilters.Count -eq 0) {
+                    $isExcluded = Test-FileExcluded -file $file -excludePatterns $excludePatterns
+                }
+
+                if ($isExcluded) {
+                    $fileNodes += @{ Label = "[Exclu] " + $file.Name; Color = [System.Drawing.Color]::Gray }
+                } else {
+                    $fileNodes += @{ Label = "📷 " + $file.Name; Color = [System.Drawing.Color]::DarkGreen }
+                    $ownWork = $true
+                }
+            }
+
+            $currentNode = $parentNode.Nodes.Add($dirName)
+            $currentNode.Tag = $dirPath
+
+            if ($ownWork) {
+                foreach ($fn in $fileNodes) {
+                    $node = $currentNode.Nodes.Add($fn.Label)
+                    $node.ForeColor = $fn.Color
+                }
+                $anyKept = $true
+            }
+
+            $childKept = Add-DirectoryToTree -parentPath $dirPath -parentNode $currentNode -imageExtensions $imageExtensions -excludePatterns $excludePatterns -dirFilters $dirFilters
+            if ($childKept) { $anyKept = $true }
+
+            if (-not $ownWork -and -not $childKept) {
+                $currentNode.Remove()
+            }
+        }
+    }
+    catch {}
+    return $anyKept
+}
+
+Function Scan-DirectoryTree {
+    $targetDir = $txtDir.Text
+
+    if ([string]::IsNullOrWhiteSpace($targetDir) -or -not [System.IO.Directory]::Exists($targetDir)) {
+        [System.Windows.Forms.MessageBox]::Show("Veuillez sélectionner un répertoire racine valide.", "Erreur", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        return $false
+    }
+
+    $treeView.Nodes.Clear()
+    $imageExtensions = Get-ImageExtensions
+    $excludePatterns = $txtExclude.Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $dirFilters = $txtDirFilter.Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+    $rootNode = $treeView.Nodes.Add($targetDir)
+    $rootNode.Tag = $targetDir
+
+    try {
+        $rootInfo = [System.IO.DirectoryInfo]$targetDir
+        foreach ($file in $rootInfo.GetFiles() | Sort-Object Name) {
+            if ($imageExtensions -contains $file.Extension.ToLower()) {
+                $isExcluded = Test-FileExcluded -file $file -excludePatterns $excludePatterns
+                if ($isExcluded) {
+                    $rootNode.Nodes.Add("[Exclu] " + $file.Name).ForeColor = [System.Drawing.Color]::Gray
+                } else {
+                    $rootNode.Nodes.Add("📷 " + $file.Name).ForeColor = [System.Drawing.Color]::DarkGreen
+                }
+            }
+        }
+    } catch {}
+
+    Add-DirectoryToTree -parentPath $targetDir -parentNode $rootNode -imageExtensions $imageExtensions -excludePatterns $excludePatterns -dirFilters $dirFilters
+
+    if ($rootNode.Nodes.Count -eq 0) {
+        $emptyNode = $rootNode.Nodes.Add("(Aucun répertoire à compresser détecté avec ces filtres)")
+        $emptyNode.ForeColor = [System.Drawing.Color]::Gray
+    }
+
+    $rootNode.Expand()
+    return $true
+}
+
+$btnBrowse.Add_Click({
+    $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+    if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $txtDir.Text = $dialog.SelectedPath
+        Scan-DirectoryTree
+    }
+})
+
+$btnScan.Add_Click({
+    Scan-DirectoryTree
+})
+
+$btnStart.Add_Click({
+    if ($treeView.Nodes.Count -eq 0) {
+        $success = Scan-DirectoryTree
+        if (-not $success) { return }
+    }
+
+    $targetDir = $txtDir.Text
+
+    if ([string]::IsNullOrWhiteSpace($targetDir) -or -not [System.IO.Directory]::Exists($targetDir)) {
+        [System.Windows.Forms.MessageBox]::Show("Veuillez sélectionner un répertoire racine valide.", "Erreur", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Error)
+        return
+    }
+
+    $script:cancelRequested = $false
+
+    $btnStart.Text = "🛑 Arrêter le traitement"
+    $btnStart.BackColor = [System.Drawing.Color]::FromArgb(231, 76, 60)
+
+    $btnScan.Enabled = $false
+    $txtDir.Enabled = $false
+    $btnBrowse.Enabled = $false
+    $txtExclude.Enabled = $false
+    $txtDirFilter.Enabled = $false
+    $txtExt.Enabled = $false
+
+    $btnStart.Remove_Click($btnStart.Tag)
+    $cancelEvent = {
+        $script:cancelRequested = $true
+        $txtLog.AppendText("`r`n>>> Demande d'arrêt reçue... Fin en cours de l'opération en cours.`r`n")
+    }
+    $btnStart.Add_Click($cancelEvent)
+    $btnStart.Tag = $cancelEvent
+
+    $txtLog.Clear()
+    $txtLog.AppendText(">>> Traitement du répertoire en cours...`r`n`r`n")
+
+    $imageExtensions = Get-ImageExtensions
+    $excludePatterns = $txtExclude.Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $dirFilters = $txtDirFilter.Text -split ',' | ForEach-Object { $_.Trim() } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    $allDirs = [System.IO.Directory]::GetDirectories($targetDir, '*', [System.IO.SearchOption]::AllDirectories)
+    $allDirs = @($targetDir) + $allDirs
+    $allDirs = $allDirs | Sort-Object { $_.Length } -Descending
+    $compressedCount = 0
+
+    foreach ($dirPath in $allDirs) {
+        [System.Windows.Forms.Application]::DoEvents()
+        if ($script:cancelRequested) { break }
+
+        $isFilteredDir = Test-DirectoryFilter -dirPath $dirPath -filters $dirFilters
+
+        if ($dirFilters.Count -gt 0 -and -not $isFilteredDir) {
+            continue
+        }
+
+        $dirInfo = [System.IO.DirectoryInfo]$dirPath
+        $images = $dirInfo.GetFiles() | Where-Object {
+            $file = $_
+            $isImage = $imageExtensions -contains $file.Extension.ToLower()
+            if (-not $isImage) { return $false }
+
+            if (-not $isFilteredDir -or $dirFilters.Count -eq 0) {
+                if (Test-FileExcluded -file $file -excludePatterns $excludePatterns) {
+                    return $false
+                }
+            }
+            return $true
+        }
+
+        if ($images.Count -gt 0) {
+            $zipPath = "$dirPath.zip"
+            $folderName = Split-Path $dirPath -Leaf
+            if ([string]::IsNullOrEmpty($folderName)) { $folderName = $dirPath }
+
+            if (-not [System.IO.File]::Exists($zipPath)) {
+                $imagesCountIn = $images.Count
+                $txtLog.AppendText("[COMPRESS] $dirPath`r`n")
+                $txtLog.AppendText("    -> Images à compresser : $imagesCountIn`r`n")
+                $form.Refresh()
+
+                try {
+                    [System.IO.Compression.ZipFile]::CreateFromDirectory($dirPath, $zipPath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+                    $compressedCount++
+
+                    Start-Sleep -Milliseconds 200
+
+                    if ([System.IO.File]::Exists($zipPath)) {
+                        $zipStream = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+                        $zipCountOut = $zipStream.Entries.Count
+                        $zipStream.Dispose()
+
+                        $txtLog.AppendText("    -> Fichiers dans l'archive ZIP : $zipCountOut`r`n")
+
+                        if ($imagesCountIn -eq $zipCountOut) {
+                            $txtLog.AppendText("    -> VALIDATION : OK (Nombre de fichiers identique)`r`n")
+
+                            if ($chkDelete.Checked) {
+                                Remove-Item -LiteralPath $dirPath -Recurse -Force
+                                $txtLog.AppendText("    -> Dossier d'origine supprimé.`r`n")
+                            }
+                        } else {
+                            $txtLog.AppendText("    -> ATTENTION : Écart détecté entre dossier ($imagesCountIn) et ZIP ($zipCountOut). Dossier conservé.`r`n")
+                        }
+                    } else {
+                        $txtLog.AppendText("    -> ERREUR : Le ZIP n'a pas pu être trouvé après création sur le réseau.`r`n")
+                    }
+                }
+                catch {
+                    $txtLog.AppendText("    -> ERREUR : $_`r`n")
+                }
+            } else {
+                $txtLog.AppendText("[IGNORE] Le ZIP existe déjà pour : $dirPath`r`n")
+
+                try {
+                    $imagesCountIn = $images.Count
+                    $txtLog.AppendText("    -> Images restantes dans le dossier : $imagesCountIn`r`n")
+
+                    $zipStream = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
+                    $zipCountOut = $zipStream.Entries.Count
+                    $zipStream.Dispose()
+
+                    $txtLog.AppendText("    -> Fichiers dans l'archive ZIP : $zipCountOut`r`n")
+
+                    if ($imagesCountIn -eq $zipCountOut) {
+                        $txtLog.AppendText("    -> VALIDATION : OK (Nombre de fichiers identique)`r`n")
+
+                        if ($chkDelete.Checked) {
+                            Remove-Item -LiteralPath $dirPath -Recurse -Force
+                            $txtLog.AppendText("    -> Dossier d'origine supprimé.`r`n")
+                        }
+                    } else {
+                        $txtLog.AppendText("    -> ATTENTION : Écart détecté entre dossier ($imagesCountIn) et ZIP ($zipCountOut). Dossier conservé.`r`n")
+                    }
+                }
+                catch {
+                    $txtLog.AppendText("    -> ERREUR : $_`r`n")
+                }
+            }
+        }
+    }
+
+    if ($script:cancelRequested) {
+        $txtLog.AppendText("`r`n----------------------------------------`r`n")
+        $txtLog.AppendText("Opération interrompue par l'utilisateur ! $compressedCount archive(s) créée(s) avant l'arrêt.`r`n")
+        [System.Windows.Forms.MessageBox]::Show("Traitement interrompu.`n$compressedCount archive(s) créée(s).", "Interrompu", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Warning)
+    } else {
+        $txtLog.AppendText("`r`n----------------------------------------`r`n")
+        $txtLog.AppendText("Opération terminée ! $compressedCount archive(s) créée(s).`r`n")
+        [System.Windows.Forms.MessageBox]::Show("Opération terminée avec succès !`n$compressedCount archive(s) créée(s).", "Terminé", [System.Windows.Forms.MessageBoxButtons]::OK, [System.Windows.Forms.MessageBoxIcon]::Information)
+    }
+
+    $btnStart.Text = "2. Lancer la compression"
+    $btnStart.BackColor = [System.Drawing.Color]::FromArgb(46, 204, 113)
+
+    $btnStart.Enabled = $true
+    $btnScan.Enabled = $true
+    $txtDir.Enabled = $true
+    $btnBrowse.Enabled = $true
+    $txtExclude.Enabled = $true
+    $txtDirFilter.Enabled = $true
+    $txtExt.Enabled = $true
+
+    Scan-DirectoryTree
+})
+
+[void]$form.ShowDialog()
