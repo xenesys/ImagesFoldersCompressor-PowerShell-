@@ -13,7 +13,7 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $script:cancelRequested = $false
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text = "Compresseur de Dossiers d'Images - 0.11"
+$form.Text = "Compresseur de Dossiers d'Images - 0.13"
 $form.Size = New-Object System.Drawing.Size(1040, 620)
 $form.StartPosition = "CenterScreen"
 $form.FormBorderStyle = 'FixedDialog'
@@ -55,7 +55,7 @@ $labelExt.AutoSize = $true
 $form.Controls.Add($labelExt)
 
 $txtExt = New-Object System.Windows.Forms.TextBox
-$txtExt.Text = "jpg, jpeg, png, gif, bmp, webp, tiff, tif"
+$txtExt.Text = "jpg, jpeg, png, gif, bmp, webp, tiff"
 $txtExt.Location = New-Object System.Drawing.Point(15, 150)
 $txtExt.Size = New-Object System.Drawing.Size(475, 23)
 $form.Controls.Add($txtExt)
@@ -142,20 +142,30 @@ Function Test-FileExcluded([System.IO.FileInfo]$file, [string[]]$excludePatterns
     return $false
 }
 
-Function Add-DirectoryToTree($parentPath, $parentNode, $imageExtensions, $excludePatterns, $dirFilters) {
+Function Add-DirectoryToTree($parentPath, $parentNode, $imageExtensions, $excludePatterns, $dirFilters, $ancestorWillCompress = $false) {
     $anyKept = $false
     try {
         $subDirs = [System.IO.Directory]::GetDirectories($parentPath) | Sort-Object
         foreach ($dirPath in $subDirs) {
             $dirName = [System.IO.Path]::GetFileName($dirPath)
             $isFilteredDir = Test-DirectoryFilter -dirPath $dirPath -filters $dirFilters
+            $dirSkipped = ($dirFilters.Count -gt 0 -and -not $isFilteredDir)
             $dirInfo = [System.IO.DirectoryInfo]$dirPath
 
             $ownWork = $false
             $fileNodes = @()
+            $inheritedNodes = @()
             foreach ($file in ($dirInfo.GetFiles() | Sort-Object Name)) {
                 if ($imageExtensions -notcontains $file.Extension.ToLower()) { continue }
-                if ($dirFilters.Count -gt 0 -and -not $isFilteredDir) { continue }
+
+                if ($dirSkipped) {
+                    # Ce dossier ne sera pas compressé lui-même :
+                    # s'il est sous un ancêtre compressé, ses fichiers partiront dans le ZIP du parent.
+                    if ($ancestorWillCompress) {
+                        $inheritedNodes += "🖼 " + $file.Name
+                    }
+                    continue
+                }
 
                 $isExcluded = $false
                 if (-not $isFilteredDir -or $dirFilters.Count -eq 0) {
@@ -181,11 +191,27 @@ Function Add-DirectoryToTree($parentPath, $parentNode, $imageExtensions, $exclud
                 $anyKept = $true
             }
 
-            $childKept = Add-DirectoryToTree -parentPath $dirPath -parentNode $currentNode -imageExtensions $imageExtensions -excludePatterns $excludePatterns -dirFilters $dirFilters
-            if ($childKept) { $anyKept = $true }
+            $willCompressHere = $ownWork -or $ancestorWillCompress
+            $childKept = Add-DirectoryToTree -parentPath $dirPath -parentNode $currentNode -imageExtensions $imageExtensions -excludePatterns $excludePatterns -dirFilters $dirFilters -ancestorWillCompress $willCompressHere
 
             if (-not $ownWork -and -not $childKept) {
-                $currentNode.Remove()
+                if ($ancestorWillCompress -and $inheritedNodes.Count -gt 0) {
+                    foreach ($label in $inheritedNodes) {
+                        $node = $currentNode.Nodes.Add("[Dans le ZIP parent] " + ($label -replace '^🖼 ', ''))
+                        $node.ForeColor = [System.Drawing.Color]::Gray
+                    }
+                    $anyKept = $true
+                } else {
+                    $currentNode.Remove()
+                }
+            } else {
+                if (-not $ownWork -and $ancestorWillCompress -and $inheritedNodes.Count -gt 0) {
+                    foreach ($label in $inheritedNodes) {
+                        $node = $currentNode.Nodes.Add("[Dans le ZIP parent] " + ($label -replace '^🖼 ', ''))
+                        $node.ForeColor = [System.Drawing.Color]::Gray
+                    }
+                }
+                $anyKept = $true
             }
         }
     }
@@ -320,9 +346,9 @@ $btnStart.Add_Click({
             if ([string]::IsNullOrEmpty($folderName)) { $folderName = $dirPath }
 
             if (-not [System.IO.File]::Exists($zipPath)) {
-                $imagesCountIn = $images.Count
+                $imagesCountIn = [System.IO.Directory]::GetFiles($dirPath, '*', [System.IO.SearchOption]::AllDirectories).Count
                 $txtLog.AppendText("[COMPRESS] $dirPath`r`n")
-                $txtLog.AppendText("    -> Images à compresser : $imagesCountIn`r`n")
+                $txtLog.AppendText("    -> Fichiers à compresser (sous-répertoires inclus) : $imagesCountIn`r`n")
                 $form.Refresh()
 
                 try {
@@ -359,8 +385,8 @@ $btnStart.Add_Click({
                 $txtLog.AppendText("[IGNORE] Le ZIP existe déjà pour : $dirPath`r`n")
 
                 try {
-                    $imagesCountIn = $images.Count
-                    $txtLog.AppendText("    -> Images restantes dans le dossier : $imagesCountIn`r`n")
+                    $imagesCountIn = [System.IO.Directory]::GetFiles($dirPath, '*', [System.IO.SearchOption]::AllDirectories).Count
+                    $txtLog.AppendText("    -> Fichiers restants dans le dossier (sous-répertoires inclus) : $imagesCountIn`r`n")
 
                     $zipStream = [System.IO.Compression.ZipFile]::OpenRead($zipPath)
                     $zipCountOut = $zipStream.Entries.Count
